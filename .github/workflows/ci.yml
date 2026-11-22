@@ -1,0 +1,27 @@
+name: CI — FraudLake
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    name: Lint & tests unitaires
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Dépendances légères (sans Spark ni Hadoop)
+        run: pip install ruff pytest fastapi pydantic httpx
+
+      - name: Lint (ruff)
+        run: ruff check fraudlake serving tests app
+
+      - name: Tests unitaires (features, motifs d'alerte, PSI, contrat d'API)
+        run: pytest

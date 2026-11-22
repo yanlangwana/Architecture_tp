@@ -122,6 +122,13 @@ tasks:
           uv run --with kagglehub python -c "$PY_SCRIPT" "$RAW_SLUGS"
         fi
 
+  data:fraud:
+    desc: "[Projet FraudLake] Télécharger les 2 datasets du projet (transactions CB + jours fériés US)"
+    cmds:
+      - task: data:download
+        vars:
+          DATASET: "kartik2112/fraud-detection,donnetew/us-holiday-dates-2004-2021"
+
   hdfs:ls:
     desc: Lister le contenu des couches Médaillon (/lakehouse) sur HDFS
     cmds:
@@ -158,7 +165,9 @@ tasks:
       - |
         curl -fsS "http://localhost:9870/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState" | grep -q '"NumLiveDataNodes" *: *3'
       - curl -fsS http://localhost:8501/_stcore/health | grep -q "ok"
-      - echo "Tests infrastructure Docker & HDFS validés avec succès !"
+      - curl -fsS http://localhost:5050/health | grep -q "OK"
+      - curl -fsS http://localhost:8010/health | grep -q "status"
+      - echo "Tests infrastructure Docker, HDFS, MLflow et API validés avec succès !"
 
   test:j1:
     desc: Exécuter et valider le notebook Jour 1 (HDFS & Ingestion Bronze) sans polluer le fichier source
@@ -180,21 +189,66 @@ tasks:
     cmds:
       - "{{.JUPYTER_EXEC}} --output /tmp/J4_out.ipynb /workspace/notebooks/J4_Stats_Segmentation_Dashboard.ipynb"
 
+  test:j5:
+    desc: "Exécuter et valider le notebook Jour 5 (MLOps — MLflow, registre, déploiement, surveillance)"
+    cmds:
+      - "{{.JUPYTER_EXEC}} --ExecutePreprocessor.timeout=3600 --output /tmp/J5_out.ipynb /workspace/notebooks/J5_MLOps_Industrialisation.ipynb"
+
+  test:unit:
+    desc: Lancer les tests unitaires (features, motifs d'alerte, PSI, API) dans le conteneur
+    cmds:
+      - docker exec -w /workspace spark-jupyter python -m pytest tests
+
+  lint:
+    desc: Contrôle qualité du code Python (ruff)
+    cmds:
+      - docker exec -w /workspace spark-jupyter ruff check fraudlake serving tests app
+
   test:notebooks:
-    desc: Exécuter la chaîne complète des notebooks (Jours 1 à 4) et vérifier les couches Delta sur HDFS
+    desc: Exécuter la chaîne complète des notebooks (Jours 1 à 5) et vérifier les couches Delta sur HDFS
     cmds:
       - task: test:j1
       - task: test:j2
       - task: test:j3
       - task: test:j4
+      - task: test:j5
       - |
         docker exec namenode bash -c 'test $(hdfs dfs -ls -d /lakehouse/bronze/*/_delta_log 2>/dev/null | wc -l) -gt 0'
         docker exec namenode bash -c 'test $(hdfs dfs -ls -d /lakehouse/silver/*/_delta_log 2>/dev/null | wc -l) -gt 0'
         docker exec namenode bash -c 'test $(hdfs dfs -ls -d /lakehouse/gold/*/_delta_log 2>/dev/null | wc -l) -gt 0'
-      - echo "Les 4 notebooks (J1 -> J4) et les couches Delta (Bronze, Silver, Gold) sont validés !"
+      - echo "Les 5 notebooks (J1 -> J5) et les couches Delta (Bronze, Silver, Gold) sont validés !"
 
   test:all:
-    desc: Lancer la validation complète (infrastructure Docker + exécution bout-en-bout J1..J4)
+    desc: Lancer la validation complète (lint + tests unitaires + infrastructure Docker + exécution bout-en-bout J1..J5)
     cmds:
+      - task: lint
+      - task: test:unit
       - task: test:docker
       - task: test:notebooks
+
+  # ==========================================
+  # MLOPS (PROJET FRAUDLAKE)
+  # ==========================================
+  mlops:ui:
+    desc: Ouvrir les interfaces MLOps (MLflow :5050, documentation de l'API :8010/docs)
+    cmds:
+      - echo "MLflow  -> http://localhost:5050"
+      - echo "API     -> http://localhost:8010/docs"
+
+  mlops:retrain:
+    desc: "Ré-entraîner, valider et (si les portes passent) promouvoir un nouveau champion ; rapport horodaté dans mlops/runs/"
+    cmds:
+      - mkdir -p mlops/runs
+      - "{{.JUPYTER_EXEC}} --ExecutePreprocessor.timeout=3600 --output /workspace/mlops/runs/J5_$(date +%Y%m%d_%H%M%S).ipynb /workspace/notebooks/J5_MLOps_Industrialisation.ipynb"
+      - curl -fsS -X POST http://localhost:8010/reload
+
+  api:smoke:
+    desc: Vérifier l'API de scoring (santé + prédiction d'une transaction d'exemple)
+    cmds:
+      - curl -fsS http://localhost:8010/health
+      - echo ""
+      - >
+        docker exec -w /workspace spark-jupyter python -c "import json, requests;
+        from serving.schemas import EXAMPLE;
+        r = requests.post('http://fraud-api:8000/predict', json=EXAMPLE, timeout=60);
+        print(json.dumps(r.json(), indent=2, ensure_ascii=False))"

@@ -26,6 +26,91 @@ flowchart LR
 
 ---
 
+## 🛡️ Notre projet : FraudLake — Détection de transactions frauduleuses
+
+| | |
+|---|---|
+| **Problématique** | Quels signaux distinguent une transaction bancaire frauduleuse, et comment prioriser les alertes pour réduire les pertes sans saturer l'équipe anti-fraude ? |
+| **Source 1 — faits** | [`kartik2112/fraud-detection`](https://www.kaggle.com/datasets/kartik2112/fraud-detection) : 1 852 394 transactions CB (2019 – 2020), 0,52 % de fraudes — `fraudTrain.csv` (335 Mo, 21 blocs HDFS) + `fraudTest.csv` (143 Mo, 9 blocs) |
+| **Source 2 — enrichissement** | [`donnetew/us-holiday-dates-2004-2021`](https://www.kaggle.com/datasets/donnetew/us-holiday-dates-2004-2021) : calendrier des jours fériés US |
+| **Jointure** | temporelle : date de transaction ⟷ jour férié le plus proche (± 3 jours), `BroadcastHashJoin` sur dimension à clé unique |
+
+```mermaid
+flowchart LR
+    K1["fraudTrain.csv + fraudTest.csv<br/>(478 Mo)"] --> B1["bronze/transactions"]
+    K2["US Holiday Dates"] --> B2["bronze/us_holidays"]
+    B1 -->|"qualité · pseudonymisation SHA-256<br/>features vélocité (Window)"| S["silver/transactions_enriched<br/>(partitionné par mois)"]
+    B2 -->|"dimension calendrier ±3 j<br/>(clé unique, broadcast)"| S
+    S -->|"Spark SQL : Pareto, LAG,<br/>Wilson, ROW_NUMBER"| G["gold/* (21 tables + data_catalog)"]
+    S -->|"SciPy · K-Means · GBT MLlib"| G
+    G --> D["Dashboard Streamlit FraudLake<br/>(:8501)"]
+```
+
+| Jour | Notebook | Points forts |
+|---|---|---|
+| J1 | `J1_HDFS_Ingestion_Bronze` | upload HDFS idempotent, cartographie des blocs par DataNode, état du cluster pendant le crash-test, alignement 1 partition = 1 bloc, schéma explicite |
+| J2 | `J2_Spark_Delta_Silver` | vides masqués, incohérence `unix_time` (+7 ans), RGPD, 20 features (Haversine, vélocité 24 h sans fuite), preuve chiffrée de l'explosion N-à-M évitée, MERGE *chargebacks* → Time Travel → `RESTORE` |
+| J3 | `J3_Analytics_SQL_Gold` | `GROUPING SETS`, Pareto des pertes, moyenne glissante 7 j, `LAG`, IC de Wilson par État, échantillon stratifié pondéré, `OPTIMIZE ZORDER BY`, catalogue `data_catalog` |
+| J4 | `J4_Stats_Segmentation_Dashboard` | 4 tests avec tailles d'effet, K-Means des porteurs (silhouette), **modèle GBT** évalué sur période future (PR-AUC), courbe de seuil coût/bénéfice |
+| J5 | `J5_MLOps_Industrialisation` | **MLOps** : 5 candidats suivis dans MLflow, données versionnées (Delta Time Travel), portes qualité + équité (règle des 4/5), registre `@champion`, déploiement API, file d'alertes expliquée, surveillance PSI + test de stress |
+
+### ⚙️ Volet MLOps
+
+```mermaid
+flowchart LR
+    S["Silver @ version Delta figée"] --> E["MLflow Tracking<br/>5 candidats"]
+    E --> Q{"Portes qualité<br/>PR-AUC · rappel · précision · équité 4/5"}
+    Q -->|"✅"| R["Registre MLflow<br/>@champion · @previous_champion"]
+    Q -->|"❌"| C["@challenger"]
+    R --> H["/lakehouse/models/…/champion"]
+    H --> A["API FastAPI :8010<br/>/predict · /reload"]
+    H --> B["gold/fraud_alerts<br/>priorité + motifs"]
+    H --> M["Surveillance<br/>PSI · performance mensuelle"]
+    M -->|"dérive"| E
+```
+
+| Composant | Emplacement | Rôle |
+|---|---|---|
+| Package partagé | `fraudlake/` | features, motifs d'alerte, seuils, PSI : **une seule définition** pour l'entraînement, le batch et l'API |
+| API de scoring | `serving/` · service `fraud-api` (:8010) | FastAPI : `/predict`, `/predict/batch`, `/health`, `/stats`, `/reload` (bascule à chaud du champion) |
+| Suivi & registre | service `mlflow` (:5050) | expériences, métriques, artefacts, versions et alias du modèle |
+| Tests & CI | `tests/` · `.github/workflows/ci.yml` | 33 tests unitaires (features, motifs, PSI, contrat d'API) + `ruff` |
+| Fiche modèle | `mlops/MODEL_CARD.md` | générée à chaque exécution de J5 |
+
+Résultats obtenus sur le cluster (exécution complète J1 → J5) : champion `gbt_v2` avec **PR-AUC 0,926** sur la période de test,
+rappel 86 %, précision 89 %, ratio d'équité 0,87 ; alertes « critiques » confirmées à **97,1 %** ; seule une vraie dérive
+(décembre, achats de Noël) déclenche un ré-entraînement.
+
+> ⚠️ **Ressources Docker** : prévoir au moins 8 Go de RAM et 15 Go de disque libres pour Docker Desktop (Settings › Resources).
+> Sur macOS, le port 5000 est réservé par AirPlay : MLflow est donc exposé sur **5050** et l'API sur **8010**
+> (modifiables via les variables `MLFLOW_PORT` et `API_PORT`).
+
+```bash
+task test:unit     # 33 tests unitaires        task api:smoke     # santé + prédiction d'exemple
+task mlops:retrain # ré-entraîner / promouvoir  task mlops:ui      # MLflow :5050 · API :8010/docs
+```
+
+```bash
+task up && task data:fraud      # cluster + téléchargement des 2 datasets
+task test:notebooks             # exécute J1 → J5 et valide les couches Delta
+open http://localhost:8501      # dashboard FraudLake
+```
+
+### 📊 Dashboard FraudLake (:8501)
+
+Interface en 12 pages avec navigation latérale, lisant uniquement la couche Gold : vue d'ensemble, **recherche de transactions** (console type backoffice : recherche, filtres, fiche détaillée), catégories (Pareto), temporalité,
+géographie (intervalles de Wilson), segments clients, modèle de scoring (simulateur de seuil et gain net), **scoring temps réel**
+(appel de l'API du champion : jauge, verdict, motifs), tests statistiques, file d'alertes (flux de détection Sankey, export CSV),
+MLOps (registre, dérive, équité) et gouvernance des données. Lien direct vers une page : `http://localhost:8501/?page=live`.
+Thème : `app/.streamlit/config.toml`.
+
+L'API se répare seule si sa JVM Spark est tuée (manque de mémoire) : `/health` passe en `degraded`, et l'appel suivant relance Spark,
+recharge le champion et rejoue la requête.
+
+> Les notebooks vierges d'origine sont conservés dans `notebooks/example/_template_vierge/`.
+
+---
+
 ## Critères de choix de vos Datasets Kaggle (Mono ou Multi-Sources avec Jointure)
 
 Pour tirer pleinement parti de l'infrastructure distribuée, des jointures Spark (Jour 2) et des exercices statistiques (Jours 3 & 4), choisissez sur [Kaggle Datasets](https://www.kaggle.com/datasets) **soit un dataset relationnel multi-tables, soit 2 (ou plusieurs) datasets complémentaires** respectant ces critères :
@@ -110,6 +195,8 @@ docker compose up -d --build
 | **JupyterLab** | http://localhost:8888 | Mot de passe / Token : `bigdata` |
 | **Spark Web UI** | http://localhost:4040 | DAG, Stages & Shuffle *(actif dès qu'une `SparkSession` tourne)* |
 | **Dashboard Streamlit** | http://localhost:8501 | Lecture des tables Delta de `/lakehouse/gold/` avec cache 60s |
+| **MLflow** | http://localhost:5050 | Expériences, runs, artefacts et registre de modèles (projet FraudLake) |
+| **API de scoring** | http://localhost:8010/docs | Documentation interactive FastAPI — `POST /predict` avec la transaction d'exemple |
 
 ---
 

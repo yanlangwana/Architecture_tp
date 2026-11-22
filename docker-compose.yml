@@ -127,6 +127,10 @@ services:
     ports:
       - "8888:8888" # JupyterLab (token : bigdata)
       - "4040:4040" # Spark Web UI (DAG, Stages, Shuffle — actif quand une session tourne)
+    environment:
+      MLFLOW_TRACKING_URI: "http://mlflow:5000"
+      FRAUDLAKE_API_URL: "http://fraud-api:8000"
+      MLFLOW_DISABLE_AGENT_HINT: "1"
     volumes:
       - .:/workspace
       - ./config/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
@@ -159,15 +163,82 @@ services:
     volumes:
       - ./app:/workspace/app
       - ./config/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    working_dir: /workspace/app # lit app/.streamlit/config.toml (thème)
     command: >
       streamlit run /workspace/app/dashboard.py
       --server.address=0.0.0.0
       --server.port=8501
       --server.runOnSave=true
+      --server.fileWatcherType=poll
+    networks:
+      - bigdata-net
+
+  # ==========================================
+  # MLOPS : SUIVI DES EXPÉRIENCES & REGISTRE DE MODÈLES (MLflow)
+  # ==========================================
+  mlflow:
+    image: local/bigdata-workspace:latest
+    pull_policy: never
+    container_name: mlflow
+    hostname: mlflow
+    depends_on:
+      spark-jupyter:
+        condition: service_started
+    ports:
+      - "${MLFLOW_PORT:-5050}:5000" # Interface MLflow sur l'hôte : http://localhost:5050 (5000 est réservé par AirPlay sur macOS)
+    environment:
+      MLFLOW_DISABLE_AGENT_HINT: "1"
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"   # pas de workers de tâches GenAI (~2 Go de RAM économisés)
+    volumes:
+      - mlflow_data:/mlflow
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/artifacts
+      --allowed-hosts "mlflow,mlflow:5000,localhost,localhost:*,127.0.0.1,127.0.0.1:*"
+      --workers 1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:5000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - bigdata-net
+
+  # ==========================================
+  # MLOPS : API DE SCORING TEMPS RÉEL (FastAPI, modèle @champion)
+  # ==========================================
+  fraud-api:
+    image: local/bigdata-workspace:latest
+    pull_policy: never
+    container_name: fraud-api
+    hostname: fraud-api
+    depends_on:
+      hdfs-init:
+        condition: service_completed_successfully
+      spark-jupyter:
+        condition: service_started
+    ports:
+      - "${API_PORT:-8010}:8000" # API REST sur l'hôte : http://localhost:8010/docs
+    working_dir: /workspace
+    environment:
+      FRAUDLAKE_SPARK_MASTER: "local[2]"
+    volumes:
+      - .:/workspace
+      - ./config/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    command: uvicorn serving.app:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
     networks:
       - bigdata-net
 
 volumes:
+  mlflow_data:
   namenode_data:
   datanode1_data:
   datanode2_data:

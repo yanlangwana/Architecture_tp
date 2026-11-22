@@ -12,3 +12,11 @@ spark-warehouse/
 metastore_db/
 derby.log
 .venv/
+
+# Artefacts MLOps locaux (mode de repli MLflow sans serveur, rapports d'exécution)
+mlops/mlflow.db
+mlops/mlartifacts/
+mlops/runs/
+
+# macOS
+.DS_Store
