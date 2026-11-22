@@ -1,5 +1,14 @@
 # TP Big Data Lakehouse — HDFS (3 DataNodes) + PySpark + Delta Lake + Streamlit
 
+> **🛡️ FraudLake — Détection de transactions bancaires frauduleuses**
+>
+> | | |
+> |---|---|
+> | **Réalisé par** | **Yan-Mol LANGWANA** et **Rabab KOULI** |
+> | **Cours** | Architecture des systèmes Big Data |
+> | **Professeur** | Antoine GREA |
+> | **Rapport** | [`rapport/rapport.pdf`](rapport/rapport.pdf) |
+
 Environnement pédagogique complet compatible nativement **`linux/amd64` (PC x86_64 / WSL2)** et **`linux/arm64` (Apple Silicon M1–M4 / Linux ARM64)** sur **Ubuntu 26.04 LTS**, reposant sur un **cluster HDFS 3.5 réel distribué (1 NameNode + 3 DataNodes)** avec blocs réduits à **16 Mo** et détection de panne abaissée à **~50 secondes**, couplé à une image mutualisée légère (`ubuntu:26.04` + **Python 3.15** via `uv` + OpenJDK 21 + JARs Delta pré-embarqués) pour **PySpark 4.2**, **Delta Lake 4.4**, **JupyterLab 4.6** et **Streamlit**.
 
 Chaque étudiant / groupe **choisit librement sa thématique métier et combine un dataset multi-tables ou plusieurs datasets publics complémentaires sur Kaggle** (croisés par jointure distribuée) pour construire de bout en bout une architecture **Data Lakehouse Médaillon (Bronze → Silver → Gold → Dashboard)**.
@@ -27,6 +36,8 @@ flowchart LR
 ---
 
 ## 🛡️ Notre projet : FraudLake — Détection de transactions frauduleuses
+
+*Projet de Yan-Mol LANGWANA et Rabab KOULI — encadré par Antoine GREA.*
 
 | | |
 |---|---|
